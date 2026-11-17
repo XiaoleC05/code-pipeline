@@ -42,7 +42,7 @@ only after a refresh.
 | `locale/{en,zh}.json` | Plugin title, description, detail document |
 | `docs/DETAIL.md` | The plugin-page document shown by Plugin Manager |
 | `test/pipeline.test.mjs` | Acceptance-mapped tests (10 cases) |
-| `test/client-sim.mjs` | Runs `client.js` against a fake module loader to verify slot registration |
+| `test/client-sim.test.mjs` | Runs `client.js` against a fake module loader to verify slot registration |
 | `scripts/gen-presets.mjs` | Authoring source for all presets (rule text, tier, source URL) |
 | `scripts/smoke.mjs` | End-to-end fixture run |
 | `scripts/fix-probe.mjs` | One-off probe of Biome's safe/unsafe fix classification (evidence, not runtime) |
@@ -94,10 +94,13 @@ code_standardize       — mode: "report" | "fix", paths: [...] or all: true
 ## Verify
 
 ```powershell
-node --test test/pipeline.test.mjs   # 10 acceptance-mapped cases
-node test/client-sim.mjs             # client slot registration contract
-node scripts/smoke.mjs               # fixture workspace end to end
+npm test                                           # both test files (11 tests)
+node --test test/pipeline.test.mjs                 # 10 acceptance-mapped cases
+node --test test/client-sim.test.mjs               # client slot registration contract
+node scripts/smoke.mjs                             # fixture workspace end to end
 ```
+
+Bare `node --test` discovers the same two files, so it reports the same 11 tests.
 
 ## Limitations
 

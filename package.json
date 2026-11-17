@@ -31,7 +31,7 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test test/",
+    "test": "node --test test/pipeline.test.mjs test/client-sim.test.mjs",
     "smoke": "node scripts/smoke.mjs",
     "gen:presets": "node scripts/gen-presets.mjs"
   },

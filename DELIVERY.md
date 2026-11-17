@@ -37,7 +37,7 @@ overview; `docs/DETAIL.md` is the text shown on the bundle's detail page.
 | `docs/DETAIL.md` | The bundle detail document rendered by Plugin Manager: capability, usage, what it refuses to do, engine table. |
 | `icon.svg` | Bundle icon exported as `./icon` and shown in Plugin Manager / plugin rows. |
 | `test/pipeline.test.mjs` | 10 acceptance-mapped `node:test` cases: presets, classification, skip rules, tree/select-all, report-vs-fix writes, Makefile tabs, non-P0 skip, path escape, findings. |
-| `test/client-sim.mjs` | Runs `client.js` against a fake `window.__ModuleLoader__` and a fake React to assert the two slot registrations and their ids; a self-contained script, not a `node:test` file. |
+| `test/client-sim.test.mjs` | Runs `client.js` against a fake `window.__ModuleLoader__` and a fake React to assert the two slot registrations and their ids. A file-level `node:test` case: its top-level code runs under the test runner, and any thrown error fails it. |
 | `scripts/gen-presets.mjs` | Authoring source for all ten presets (rule text, category, tier, source URL, engine config); its output is committed. |
 | `scripts/smoke.mjs` | End-to-end fixture run: engine probes, preset dump, scan, tree, report-mode standardization. |
 | `scripts/fix-probe.mjs` | One-off exploratory probe that records how Biome 2.6 classifies candidate fixes as safe/unsafe; evidence for the style-finding design, not used by the plugin or the tests. |
@@ -211,7 +211,9 @@ itself talks to three Host routes: `GET /dsh-code-pipeline/api/state?root=`,
    - TypeScript and JavaScript run a lint pass and report findings, never apply them;
    - the four S-category rules whose preset metadata says `fix: auto`
      (`js/S/eqeqeq`, `js/S/use-const`, `py/S/compare-none`, `ts/S/use-const`) are **not**
-     applied — the metadata and the behaviour disagree;
+     applied — the metadata and the behaviour disagree. **Unresolved:** aligning them
+     needs a behaviour decision (enable a safe-fix pass or change the metadata), so it
+     was deliberately left out of the documentation and test fixes;
    - the three F-category rules marked `fix: report` (`css/F/zero-unit`,
      `html/F/lowercase`, `html/F/doctype`) are declared, not enforced, and format-depth
      languages have no lint pass that could report them.
@@ -235,15 +237,9 @@ itself talks to three Host routes: `GET /dsh-code-pipeline/api/state?root=`,
 8. **The panel does not surface `truncated`.** The Host state carries the flag, but the
    panel's empty state only shows `files scanned`; on a workspace beyond the 4,000-file
    cap, the tree is silently partial.
-9. **`npm test` is broken on Node 22.19.0 / Windows.** The script is
-   `node --test test/`; that directory argument makes Node treat `test` as a module and
-   fail with `Error: Cannot find module 'D:\05_Code\code-pipeline\test'` (
-   exit 1). Use `node --test test/pipeline.test.mjs` or
-   `node --test "test/**/*.test.mjs"` instead, as `README.md` already documents. This is
-   a repository defect; it was reported, not fixed, in this documentation change.
-10. **No test exercises the Host HTTP routes.** `test/pipeline.test.mjs` covers the
-    library layer, `test/client-sim.mjs` covers slot registration, and `scripts/smoke.mjs`
-    covers the orchestrator; `index.js`'s route/tool registration is not directly tested.
+9. **No test exercises the Host HTTP routes.** `test/pipeline.test.mjs` covers the library
+   layer, `test/client-sim.test.mjs` covers slot registration, and `scripts/smoke.mjs`
+   covers the orchestrator; `index.js`'s route/tool registration is not directly tested.
 
 ## 6. Verification performed for this document
 
@@ -251,13 +247,12 @@ Environment: Node v22.19.0, Windows, repository at `D:\05_Code\code-pipeline`.
 
 | Command | Result |
 | --- | --- |
+| `npm test` | 11 tests, 11 pass, 0 fail, exit 0 — the script lists both test files explicitly |
+| `node --test` (no arguments) | 11 tests, 11 pass, 0 fail — default discovery finds the same two files, so both entry points report the same count |
 | `node --test test/pipeline.test.mjs` | 10 tests, 10 pass, 0 fail |
-| `node --test "test/**/*.test.mjs"` | 10 tests, 10 pass, 0 fail (glob excludes `client-sim.mjs`) |
-| `node --test` (no arguments) | 11 tests, 11 pass — Node's default discovery also executes `test/client-sim.mjs` as a file-level test |
-| `node test/client-sim.mjs` | OK: `sidebar.panellist` id `code-pipeline` and `main` key `code-pipeline` registered; report printed |
+| `node --test test/client-sim.test.mjs` | 1 test, 1 pass, 0 fail — the client slot registration contract |
 | `node scripts/smoke.mjs` | all six engine ids ready; 10 presets; 12 files scanned (10 P0 + 2 non-P0); 10 processed: 9 changed, 1 unchanged, 0 failed, 0 degraded, 1 lint finding; exit 0 |
 | `node scripts/gen-presets.mjs` | "wrote 10 presets, 70 rules"; `git status` unchanged (committed presets match the authoring source) |
-| `npm test` | **fails**: `Error: Cannot find module 'D:\05_Code\code-pipeline\test'`, exit 1 — see limitation 9 |
 
 ## 7. Documentation notes
 
@@ -267,5 +262,14 @@ Environment: Node v22.19.0, Windows, repository at `D:\05_Code\code-pipeline`.
   automatically)" (three F rules are declared-only) and "every rule carries … a source
   URL" (the seven T0 rules deliberately have none). The README install line was replaced
   with the Plugin Manager / linked-checkout method that this profile actually uses.
+- `npm test` used to fail on Node 22.19.0 / Windows because `node --test test/` treated
+  the directory argument as a module. It is fixed: the script now runs
+  `node --test test/pipeline.test.mjs test/client-sim.test.mjs`, and the client contract
+  file was renamed to `test/client-sim.test.mjs` so bare `node --test` discovers the same
+  11 tests. `npm test` and `node --test` therefore report identical results; plugin
+  behaviour is untouched.
+- The four S-rule `fix: auto` entries remain an **unresolved metadata/behaviour
+  mismatch** (see limitation 2). Fixing it requires a behaviour decision, so no behaviour
+  was changed in this pass.
 - `docs/DETAIL.md` and `locale/*.json` were checked for stale counts; they contain no
   numeric rule claims, so no edit was needed.
