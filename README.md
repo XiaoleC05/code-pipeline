@@ -7,16 +7,23 @@ language presets that apply a consistent style to the files you pick.
 > Status: v0.1.0, P0 languages only. Anything outside the ten languages below is
 > listed with a `跳过` badge and is never modified.
 
+Delivery notes (file inventory, verified preset counts, skip policy, limitations, test
+results): [`DELIVERY.md`](DELIVERY.md).
+
 ## Install
 
-```powershell
-# from a DeepSeek Harness profile, pointing at this checkout
-# (the plugin manager links the directory; it is not published to npm)
-dsh plugin add link:D:/05_Code/code-pipeline
+The bundle is a linked local checkout, not a published npm package. Add it through
+DeepSeek Harness's **Plugin Manager** with the link spec below; a linked directory is
+used in place, so run `pnpm install` in the checkout first.
+
+```
+link:D:/05_Code/code-pipeline
 ```
 
-Then reload the GUI page once — the Client half is injected into the boot graph at
-page load, so a newly installed bundle appears only after a refresh.
+The profile used for this checkout already has it installed and enabled
+(`source: link:D:\05_Code\code-pipeline`). Then reload the GUI page once — the Client
+half is injected into the boot graph at page load, so a newly installed bundle appears
+only after a refresh.
 
 ## What is in the repository
 
@@ -38,6 +45,8 @@ page load, so a newly installed bundle appears only after a refresh.
 | `test/client-sim.mjs` | Runs `client.js` against a fake module loader to verify slot registration |
 | `scripts/gen-presets.mjs` | Authoring source for all presets (rule text, tier, source URL) |
 | `scripts/smoke.mjs` | End-to-end fixture run |
+| `scripts/fix-probe.mjs` | One-off probe of Biome's safe/unsafe fix classification (evidence, not runtime) |
+| `DELIVERY.md` | Delivery record: inventory, verified preset table, skip policy, limitations |
 
 ## P0 presets
 
@@ -54,10 +63,14 @@ page load, so a newly installed bundle appears only after a refresh.
 | Shell | `shell` | shfmt (WASM) | format | 5 (F2 / S2 / X1) | `presets/shell.json` |
 | PowerShell | `powershell` | built-in text rules | text | 7 (F5 / S1 / X1) | `presets/powershell.json` |
 
-Rule classes: **F** format (applied automatically) · **S** style (reported, never
-auto-applied) · **X** capability note. Every rule carries a tier (`T1` official text,
-`T2` official tool default, `T3` de-facto standard, `T0` local decision) and a source
-URL, so the panel can show provenance instead of asserting authority it does not have.
+Rule classes: **F** format · **S** style · **X** capability note. The class says what a
+rule is about, not that it is enforced: only formatter output is written, TypeScript and
+JavaScript additionally report Biome lint findings, and rules an engine cannot enforce
+stay declared in the preset. Each rule records an intended handling (`fix: auto` 40,
+`report` 21, `none` 9), a tier (`T1` official text, `T2` official tool default, `T3`
+de-facto standard, `T0` local decision) and a source URL where one exists — the seven
+`T0` rules deliberately have none, so the panel shows provenance instead of asserting
+authority it does not have.
 
 `depth` means what actually ran: `full` = formatted **and** lint diagnostics collected,
 `format` = formatted only, `text` = whitespace rules only. A missing engine degrades a
