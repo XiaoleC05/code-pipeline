@@ -28,12 +28,14 @@
     "icon.svg"
   ],
   "engines": {
-    "node": ">=22.19.0"
+    "node": ">=22.19.0",
+    "dsh": ">=0.2.2-rc.1"
   },
   "scripts": {
-    "test": "node --test test/pipeline.test.mjs test/client-sim.test.mjs",
+    "test": "node --test test/pipeline.test.mjs test/policy.test.mjs test/routes.test.mjs test/client-sim.test.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "gen:presets": "node scripts/gen-presets.mjs"
+    "gen:presets": "node scripts/gen-presets.mjs",
+    "security:probe": "node scripts/security-probe.mjs"
   },
   "keywords": [
     "deepseek-harness",
@@ -53,7 +55,8 @@
       "immediately": true,
       "inject": [
         "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-layout"
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-locale"
       ]
     }
   },

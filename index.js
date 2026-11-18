@@ -5,25 +5,32 @@
  * - serve the panel's HTTP API under /dsh-code-pipeline/api
  * - expose two agent tools: code_list_files and code_standardize
  *
- * All file access is confined to a workspace root resolved here, never to a
- * path the panel invents: every incoming relative path is re-checked by
- * resolveInside() before it is read or written.
+ * Security posture: raw webserver routes are forwarded by the host without its
+ * browser-trust fence, so every route first asks the host Connection service for
+ * the same Host/Origin/credential decision the official /api surface uses. File
+ * access is confined by a workspace-root policy and a runtime path policy; a
+ * path a caller names explicitly is still re-checked against the scan rules.
  */
-import { resolve } from 'node:path'
 import { scanTree, buildTree } from './lib/tree.js'
 import { listPresets, describePreset } from './lib/presets.js'
 import { standardize } from './lib/standardize.js'
 import { probeEngines } from './lib/engines/index.js'
 import { P0_LANGUAGES } from './lib/languages.js'
+import { normalizeConfig } from './lib/config.js'
+import { collectRoots, pickHttpRoot, pickAgentRoot } from './lib/roots.js'
+import { createRequestGuard, rejectionPayload, REJECTION_HEADERS } from './lib/trust.js'
+import { buildStatePayload, buildStandardizePayload, summarizeForTool, errorPayload } from './lib/payload.js'
 
 const API_PREFIX = '/dsh-code-pipeline/api'
+const BODY_LIMIT = 2 * 1024 * 1024
+const MAX_PATH_LENGTH = 4096
 
 export const inject = ['tools', 'webServer']
 
 function jsonResponse(value, status = 200) {
   return new Response(JSON.stringify(value), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' },
   })
 }
 
@@ -32,121 +39,73 @@ function textBlock(text) {
 }
 
 /** Bounded body reader for the raw Node handler that owns POST /standardize. */
-function readBody(req, limit = 2 * 1024 * 1024) {
+function readBody(req, limit = BODY_LIMIT) {
   return new Promise((resolvePromise, rejectPromise) => {
     const chunks = []
     let size = 0
+    let over = false
+    let settled = false
+    const fail = (code) => {
+      if (settled) return
+      settled = true
+      rejectPromise(Object.assign(new Error(code), { code }))
+    }
     req.on('data', (chunk) => {
       size += chunk.length
       if (size > limit) {
-        rejectPromise(new Error('body-too-large'))
-        req.destroy()
+        // Keep draining so the client can read our 413 instead of seeing a reset.
+        over = true
+        chunks.length = 0
         return
       }
-      chunks.push(chunk)
+      if (!over) chunks.push(chunk)
     })
-    req.on('end', () => resolvePromise(Buffer.concat(chunks).toString('utf8')))
-    req.on('error', rejectPromise)
+    req.on('end', () => {
+      if (settled) return
+      if (over) return fail('body-too-large')
+      settled = true
+      resolvePromise(Buffer.concat(chunks).toString('utf8'))
+    })
+    req.on('error', fail)
+    req.on('aborted', () => fail('aborted'))
   })
 }
 
-function summarize(result) {
-  const { stats } = result
-  const lines = [
-    `${result.mode === 'fix' ? 'Applied' : 'Checked'} ${stats.processed} file(s): ${stats.changed} changed, ${stats.unchanged} unchanged, ${stats.skipped} skipped, ${stats.failed} failed.`,
-  ]
-  if (result.mode === 'fix') lines.push(`Wrote ${stats.written} file(s) to disk.`)
-  else if (stats.changed > 0) lines.push('Report-only run: no file was modified.')
-  if (stats.degraded > 0) lines.push(`${stats.degraded} file(s) used the built-in text rules because a formatter engine was unavailable.`)
-  if (stats.lintFindings > 0) {
-    lines.push(`${stats.lintFindings} style finding(s) were reported but not applied: the engine classifies those fixes as unsafe.`)
-    const sample = result.files
-      .flatMap((file) => (file.findings ?? []).map((finding) => ({ path: file.path, ...finding })))
-      .slice(0, 10)
-    for (const finding of sample) lines.push(`  - ${finding.path}:${finding.line} ${finding.rule} — ${finding.message}`)
-  }
-  const changed = result.files.filter((f) => f.status === 'changed').slice(0, 20)
-  if (changed.length > 0) {
-    lines.push('', 'Files:')
-    for (const file of changed) lines.push(`- ${file.path} (${file.language}, ${file.engine})`)
-  }
-  const failed = result.files.filter((f) => f.status === 'failed')
-  if (failed.length > 0) {
-    lines.push('', 'Failures:')
-    for (const file of failed) lines.push(`- ${file.path}: ${file.reason}`)
-  }
-  if (result.skipped.length > 0) {
-    const outside = result.skipped.filter((s) => s.reason === 'outside-p0')
-    if (outside.length > 0) lines.push('', `Skipped ${outside.length} file(s) outside the P0 language list.`)
-  }
-  return lines.join('\n')
-}
-
 export function apply(ctx, config = {}) {
-  const maxFiles = Number.isFinite(config.maxFiles) ? config.maxFiles : 4000
-  const maxBytes = Number.isFinite(config.maxBytes) ? config.maxBytes : 2 * 1024 * 1024
-
-  /** Registered workspaces, or the host default directory. */
-  function listRoots() {
-    const roots = []
-    try {
-      const registry = ctx.get('workspaceRegistry')
-      if (registry && typeof registry.list === 'function') {
-        for (const workspace of registry.list()) {
-          const path = workspace?.path ?? workspace?.directory ?? workspace?.root
-          if (typeof path === 'string' && path.length > 0) {
-            roots.push({ path, title: workspace.title ?? path })
-          }
-        }
-      }
-    } catch {
-      // Registry is optional; fall through to the default directory.
-    }
-    if (roots.length === 0) {
-      try {
-        const workingDirectory = ctx.get('workingDirectory')
-        const fallback = workingDirectory?.defaultDirectory
-        if (typeof fallback === 'string' && fallback.length > 0) roots.push({ path: fallback, title: fallback })
-      } catch {
-        // Ignore: no candidate root is reported as an empty list.
-      }
-    }
-    return roots
+  const { limits, warnings } = normalizeConfig(config)
+  const logger = ctx.logger
+  for (const warning of warnings) {
+    logger?.warn?.('code-pipeline: ' + warning.code + ' for ' + warning.field + ': ' + String(warning.from) + ' -> ' + String(warning.to))
   }
-
-  function pickRoot(requested) {
-    const roots = listRoots()
-    if (typeof requested === 'string' && requested.length > 0) {
-      const resolved = resolve(requested)
-      if (roots.length === 0) return { root: resolved, roots }
-      const match = roots.find((candidate) => resolve(candidate.path) === resolved)
-      return match ? { root: match.path, roots } : { root: null, roots, error: 'root-not-registered' }
-    }
-    return { root: roots[0]?.path ?? null, roots }
-  }
+  const guard = createRequestGuard(() => ctx.get('connection'))
 
   async function stateFor(requestedRoot) {
-    const { root, roots, error } = pickRoot(requestedRoot)
-    const engines = await probeEngines()
+    const rootsState = collectRoots(ctx)
+    const picked = pickHttpRoot(rootsState, requestedRoot)
     const base = {
-      roots,
+      root: picked.root,
+      roots: rootsState.roots,
+      limits,
+      warnings,
+      truncated: false,
+      fileCount: 0,
+      tree: [],
       presets: listPresets(),
-      p0: P0_LANGUAGES.map((lang) => ({ id: lang.id, label: lang.label, preset: lang.preset })),
-      engines,
-      limits: { maxFiles, maxBytes },
+      p0: P0_LANGUAGES,
+      engines: {},
+      errorCode: picked.error,
     }
-    if (!root) return { ...base, root: null, error: error ?? 'no-workspace', tree: [], files: [] }
+    if (picked.root === null) return buildStatePayload(base)
 
-    const scan = await scanTree(root, { maxFiles, maxBytes })
-    return {
+    const engines = await probeEngines()
+    const scan = await scanTree(picked.root, { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes })
+    return buildStatePayload({
       ...base,
-      root,
       truncated: scan.truncated,
-      dirCount: scan.dirCount,
+      fileCount: scan.files.length,
       tree: buildTree(scan.files),
-      files: scan.files,
-      selectable: scan.files.filter((file) => file.supported).map((file) => file.path),
-    }
+      engines,
+    })
   }
 
   // ------------------------------------------------------------ routes
@@ -158,11 +117,14 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: `${API_PREFIX}/state`,
       resource: async (request) => {
-        const url = new URL(request.url)
+        const rejection = guard(request)
+        if (rejection) return new Response(JSON.stringify(rejectionPayload(rejection.code)), { status: rejection.status, headers: REJECTION_HEADERS })
         try {
+          const url = new URL(request.url)
           return jsonResponse(await stateFor(url.searchParams.get('root')))
         } catch (cause) {
-          return jsonResponse({ error: 'internal', message: cause instanceof Error ? cause.message : String(cause) }, 500)
+          logger?.warn?.('code-pipeline: state handler failed: ' + (cause instanceof Error ? cause.message : String(cause)))
+          return jsonResponse(errorPayload('internal'), 500)
         }
       },
     }),
@@ -173,12 +135,15 @@ export function apply(ctx, config = {}) {
       kind: 'exact',
       path: `${API_PREFIX}/preset`,
       resource: async (request) => {
-        const url = new URL(request.url)
+        const rejection = guard(request)
+        if (rejection) return new Response(JSON.stringify(rejectionPayload(rejection.code)), { status: rejection.status, headers: REJECTION_HEADERS })
         try {
+          const url = new URL(request.url)
           const preset = describePreset(url.searchParams.get('id'))
-          return preset ? jsonResponse(preset) : jsonResponse({ error: 'unknown-preset' }, 404)
+          return preset ? jsonResponse(preset) : jsonResponse(errorPayload('unknown-preset'), 404)
         } catch (cause) {
-          return jsonResponse({ error: 'internal', message: cause instanceof Error ? cause.message : String(cause) }, 500)
+          logger?.warn?.('code-pipeline: preset handler failed: ' + (cause instanceof Error ? cause.message : String(cause)))
+          return jsonResponse(errorPayload('internal'), 500)
         }
       },
     }),
@@ -192,30 +157,69 @@ export function apply(ctx, config = {}) {
         const send = (status, value) => {
           if (res.headersSent) return
           res.statusCode = status
-          res.setHeader('content-type', 'application/json; charset=utf-8')
-          res.setHeader('cache-control', 'no-store')
+          for (const [name, headerValue] of Object.entries(REJECTION_HEADERS)) res.setHeader(name, headerValue)
           res.end(JSON.stringify(value))
         }
+        // An early response must still drain the request body; otherwise a
+        // keep-alive socket stays occupied by unread bytes.
+        const drain = () => {
+          try { req.resume?.() } catch { /* already ended */ }
+        }
+
+        // Trust gate first: a rejected request must not parse bodies or scan.
+        const rejection = guard(req)
+        if (rejection) {
+          if (rejection.status === 503) logger?.warn?.('code-pipeline: connection guard unavailable; request refused')
+          drain()
+          return send(rejection.status, rejectionPayload(rejection.code))
+        }
+        if (req.method !== 'POST') {
+          res.setHeader('allow', 'POST')
+          drain()
+          return send(405, errorPayload('method-not-allowed'))
+        }
+        if (!/^application\/json\b/iu.test(String(req.headers['content-type'] ?? ''))) {
+          drain()
+          return send(415, errorPayload('unsupported-media-type'))
+        }
+        const declaredLength = Number(req.headers['content-length'] ?? 0)
+        if (Number.isFinite(declaredLength) && declaredLength > BODY_LIMIT) {
+          drain()
+          return send(413, errorPayload('body-too-large'))
+        }
+
+        let raw
         try {
-          if (req.method !== 'POST') {
-            res.setHeader('allow', 'POST')
-            return send(405, { error: 'method-not-allowed' })
-          }
-          const raw = await readBody(req)
-          let body = {}
-          try {
-            body = raw ? JSON.parse(raw) : {}
-          } catch {
-            return send(400, { error: 'bad-json' })
-          }
-          const { root, error } = pickRoot(body.root)
-          if (!root) return send(400, { error: error ?? 'no-workspace' })
-          if (!Array.isArray(body.paths) || body.paths.length === 0) return send(400, { error: 'no-paths' })
-          const mode = body.mode === 'fix' ? 'fix' : 'report'
-          const result = await standardize({ root, paths: body.paths, mode })
-          return send(200, result)
+          raw = await readBody(req)
         } catch (cause) {
-          return send(500, { error: 'internal', message: cause instanceof Error ? cause.message : String(cause) })
+          const code = cause?.code === 'body-too-large' ? 'body-too-large' : cause?.code === 'aborted' ? 'aborted' : 'bad-request'
+          return send(code === 'body-too-large' ? 413 : 400, errorPayload(code))
+        }
+        let body
+        try {
+          body = raw ? JSON.parse(raw) : {}
+        } catch {
+          return send(400, errorPayload('bad-json'))
+        }
+
+        try {
+          const picked = pickHttpRoot(collectRoots(ctx), body?.root)
+          if (picked.root === null) return send(400, errorPayload(picked.error ?? 'no-workspace'))
+          if (!Array.isArray(body?.paths) || body.paths.length === 0) return send(400, errorPayload('no-paths'))
+          if (body.paths.length > limits.maxFiles) return send(413, errorPayload('too-many-paths'))
+          if (!body.paths.every((path) => typeof path === 'string' && path.length > 0 && path.length <= MAX_PATH_LENGTH)) {
+            return send(400, errorPayload('bad-path'))
+          }
+          if (body.mode !== undefined && body.mode !== 'report' && body.mode !== 'fix') {
+            return send(400, errorPayload('bad-mode'))
+          }
+          const mode = body.mode === 'fix' ? 'fix' : 'report'
+          const result = await standardize({ root: picked.root, paths: body.paths, mode, limits })
+          logger?.info?.( 'code-pipeline: ' + mode + ' run ' + result.runId + ' selected=' + result.stats.selected + ' processed=' + result.stats.processed + ' written=' + result.stats.written + ' failed=' + result.stats.failed)
+          return send(200, buildStandardizePayload(result))
+        } catch (cause) {
+          logger?.warn?.('code-pipeline: standardize handler failed: ' + (cause instanceof Error ? cause.message : String(cause)))
+          return send(500, errorPayload('internal'))
         }
       },
     }),
@@ -237,7 +241,15 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
       },
       output: {
-        schema: { type: 'object', description: 'File inventory.' },
+        schema: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            error: { type: 'string' },
+            count: { type: 'number' },
+          },
+          additionalProperties: true,
+        },
         render(_args, value) {
           const text = value && typeof value.text === 'string' ? value.text : 'no files'
           return textBlock(text)
@@ -245,9 +257,9 @@ export function apply(ctx, config = {}) {
       },
       async execute(args, exec) {
         const requested = typeof args?.root === 'string' ? args.root : undefined
-        const root = requested ?? (await resolveAgentRoot(ctx, exec))
-        if (!root) return { text: 'No workspace directory is available for this session.' }
-        const scan = await scanTree(root, { maxFiles, maxBytes })
+        const picked = await pickAgentRoot(ctx, exec, requested)
+        if (picked.root === null) return { text: `Workspace error: ${picked.error}`, error: picked.error }
+        const scan = await scanTree(picked.root, { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes })
         const onlySupported = args?.onlySupported !== false
         const files = onlySupported ? scan.files.filter((file) => file.supported) : scan.files
         const byLanguage = new Map()
@@ -255,7 +267,7 @@ export function apply(ctx, config = {}) {
           const key = file.supported ? file.language : `unsupported:${file.reason ?? 'other'}`
           byLanguage.set(key, (byLanguage.get(key) ?? 0) + 1)
         }
-        const lines = [`Root: ${root}`, `Files: ${files.length}`, '']
+        const lines = [`Root: ${picked.root}`, `Files: ${files.length}`, '']
         for (const [language, count] of [...byLanguage.entries()].sort()) lines.push(`- ${language}: ${count}`)
         lines.push('', 'Paths:')
         for (const file of files.slice(0, 300)) lines.push(`- ${file.path}`)
@@ -281,7 +293,16 @@ export function apply(ctx, config = {}) {
         additionalProperties: false,
       },
       output: {
-        schema: { type: 'object', description: 'Standardization summary.' },
+        schema: {
+          type: 'object',
+          properties: {
+            text: { type: 'string' },
+            error: { type: 'string' },
+            runId: { type: 'string' },
+            stats: { type: 'object' },
+          },
+          additionalProperties: true,
+        },
         render(_args, value) {
           const text = value && typeof value.text === 'string' ? value.text : 'done'
           return textBlock(text)
@@ -289,38 +310,23 @@ export function apply(ctx, config = {}) {
       },
       async execute(args, exec) {
         const requested = typeof args?.root === 'string' ? args.root : undefined
-        const root = requested ?? (await resolveAgentRoot(ctx, exec))
-        if (!root) return { text: 'No workspace directory is available for this session.' }
+        const picked = await pickAgentRoot(ctx, exec, requested)
+        if (picked.root === null) return { text: `Workspace error: ${picked.error}`, error: picked.error }
 
-        let paths = Array.isArray(args?.paths) ? args.paths.filter((p) => typeof p === 'string') : []
-        if (args?.all === true || paths.length === 0) {
-          const scan = await scanTree(root, { maxFiles, maxBytes })
+        let paths = Array.isArray(args?.paths) ? args.paths.filter((path) => typeof path === 'string' && path.length > 0) : []
+        if (args?.all === true) {
+          const scan = await scanTree(picked.root, { maxFiles: limits.maxFiles, maxBytes: limits.maxBytes })
           paths = scan.files.filter((file) => file.supported).map((file) => file.path)
         }
-        if (paths.length === 0) return { text: 'No P0 code files were found to standardize.' }
+        if (paths.length === 0) {
+          return { text: 'No paths were given. Pass workspace-relative paths, or all: true to standardize every P0 code file.', error: 'no-paths' }
+        }
+        if (paths.length > limits.maxFiles) return { text: `Too many paths (${paths.length}); the limit is ${limits.maxFiles}.`, error: 'too-many-paths' }
 
         const mode = args?.mode === 'fix' ? 'fix' : 'report'
-        const result = await standardize({ root, paths, mode })
-        return { text: summarize(result), runId: result.runId, stats: result.stats }
+        const result = await standardize({ root: picked.root, paths, mode, limits })
+        return { text: summarizeForTool(result), runId: result.runId, stats: result.stats }
       },
     }),
   )
 }
-
-async function resolveAgentRoot(ctx, exec) {
-  try {
-    const agent = exec?.agent
-    const workingDirectory = ctx.get('workingDirectory')
-    if (agent && workingDirectory && typeof workingDirectory.ensure === 'function') {
-      return await workingDirectory.ensure(agent, exec.signal)
-    }
-    if (workingDirectory && typeof workingDirectory.defaultDirectory === 'string') {
-      return workingDirectory.defaultDirectory
-    }
-  } catch {
-    // Fall through to null; the caller reports it.
-  }
-  return null
-}
-
-

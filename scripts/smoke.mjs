@@ -71,9 +71,7 @@ for (const file of result.files) {
   const flags = [file.status, file.engine, file.depth, file.degraded ? 'DEGRADED' : ''].filter(Boolean).join(' / ')
   console.log(`  ${file.path.padEnd(24)} ${flags}`)
   if (file.status === 'changed') {
-    const before = file.before.split('\n')[0]
-    const after = file.after.split('\n')[0]
-    if (before !== after) console.log(`      ${JSON.stringify(before)} -> ${JSON.stringify(after)}`)
+    console.log(`      ${file.deltaLines >= 0 ? '+' : ''}${file.deltaLines} lines, ${file.deltaBytes >= 0 ? '+' : ''}${file.deltaBytes} bytes`)
   }
 }
 console.log('skipped:', result.skipped)

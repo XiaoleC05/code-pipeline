@@ -69,8 +69,8 @@ JavaScript additionally report Biome lint findings, and rules an engine cannot e
 stay declared in the preset. Each rule records an intended handling (`fix: auto` 40,
 `report` 21, `none` 9), a tier (`T1` official text, `T2` official tool default, `T3`
 de-facto standard, `T0` local decision) and a source URL where one exists — the seven
-`T0` rules deliberately have none, so the panel shows provenance instead of asserting
-authority it does not have.
+`T0` rules deliberately have none; the preset data keeps the provenance even though the
+panel does not render rule metadata today.
 
 `depth` means what actually ran: `full` = formatted **and** lint diagnostics collected,
 `format` = formatted only, `text` = whitespace rules only. A missing engine degrades a
@@ -94,13 +94,51 @@ code_standardize       — mode: "report" | "fix", paths: [...] or all: true
 ## Verify
 
 ```powershell
-npm test                                           # both test files (11 tests)
+npm test                                           # all four test files (34 tests)
 node --test test/pipeline.test.mjs                 # 10 acceptance-mapped cases
-node --test test/client-sim.test.mjs               # client slot registration contract
+node --test test/policy.test.mjs                   # runtime path policy (encoding/size/links/ignore)
+node --test test/routes.test.mjs                   # trust gate, payload contract, tool roots
+node --test test/client-sim.test.mjs               # client slot + locale contract
 node scripts/smoke.mjs                             # fixture workspace end to end
+node scripts/security-probe.mjs                    # live host: unauthenticated/forged requests must be refused
 ```
 
-Bare `node --test` discovers the same two files, so it reports the same 11 tests.
+Bare `node --test` discovers the same four files, so it reports the same 34 tests.
+
+## Configuration
+
+There is no Plugin Manager form for this plugin: DSH 0.2.2's custom config page
+needs the `schemastery` dependency, which this linked package cannot resolve.
+Configure the loader row in the profile's `cordis.patch.yml` instead; the panel
+shows the effective limits and any configuration warnings in its status strip.
+
+```yaml
+- id: code-pipeline
+  name: dsh-code-pipeline
+  config:
+    maxFiles: 4000          # 100..20000, default 4000
+    maxBytes: 2097152       # 65536..8388608, default 2 MiB per file
+```
+
+Out-of-range or invalid values are clamped or fall back to the defaults with a
+visible warning; they never block activation.
+
+## Security model
+
+- The plugin's three HTTP routes first apply the host Connection service's
+  Host/Origin/credential fence: cross-site requests are refused with 403, no
+  browser credential yields 401, and a missing Connection service fails closed
+  with 503. Same-origin panel requests are unaffected.
+- HTTP roots must be registered workspaces. Agent tools accept the registered
+  workspaces or the Session working directory; an explicit `root` can no longer
+  point at an arbitrary directory.
+- Runtime runs reuse the scan rules: skipped dependency directories, ignored
+  files, oversized files, non-UTF-8 sources and links that leave the root are
+  never read or written even when named explicitly.
+
+- Ignore files are read only from the workspace root (`.gitignore` and
+  `.dsh-code-pipeline-ignore`); negation and `**` are not supported, and an
+  unsupported pattern simply fails to exclude.
 
 ## Limitations
 
@@ -112,4 +150,9 @@ Bare `node --test` discovers the same two files, so it reports the same 11 tests
   and generated artifacts are excluded from the tree, so select-all cannot reach them.
 - Style findings come from the engine's lint pass and are reported with file, line,
   rule and message; they are not rewritten because the engine classifies those fixes
-  as unsafe.
+  as unsafe. At most 40 findings are returned (errors first); per-file counts stay
+  complete.
+- `fix` mode has no undo; use git to review before writing. A file changed by an
+  external editor between read and write is reported as `changed-since-read` and is
+  not overwritten.
+

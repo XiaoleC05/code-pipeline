@@ -70,9 +70,22 @@ const fakeSlots = {
   },
 }
 
+const localeRegistrations = []
+const fakeLocale = {
+  register(namespace, dicts) {
+    localeRegistrations.push({ namespace, locales: Object.keys(dicts), dicts })
+    return () => {}
+  },
+  bind() {
+    return (key) => key
+  },
+}
+
 const fakeCtx = {
   slots: fakeSlots,
   layout: { selectPanel() {} },
+  effect: (callback) => callback(),
+  locale: fakeLocale,
 }
 
 const dispose = moduleExports.apply(fakeCtx)
@@ -86,8 +99,10 @@ const report = {
     id: config.id ?? null,
     key: config.key ?? null,
     order: config.order ?? null,
+    locale: config.locale ?? null,
     componentName: typeof component === 'function' ? component.name || 'anonymous' : String(component),
   })),
+  localeRegistrations,
   disposeIsFunction: typeof dispose === 'function',
 }
 
@@ -99,5 +114,18 @@ if (!panelIcon) throw new Error('no sidebar.panellist registration')
 if (!mainPage) throw new Error('no main registration')
 if (panelIcon.config.id !== 'code-pipeline') throw new Error('panel icon id mismatch')
 if (mainPage.config.key !== 'code-pipeline') throw new Error('main key must match the panel icon id')
+if (panelIcon.config.locale !== 'code-pipeline') throw new Error('panel icon must declare the locale namespace')
+if (mainPage.config.locale !== 'code-pipeline') throw new Error('main page must declare the locale namespace')
+const dictionary = localeRegistrations.find((entry) => entry.namespace === 'code-pipeline')
+if (!dictionary) throw new Error('no code-pipeline locale dictionary registration')
+if (dictionary.locales.join(',') !== 'zh,en') throw new Error('dictionary must carry zh + en')
+const zhKeys = Object.keys(dictionary.dicts.zh).sort()
+const enKeys = Object.keys(dictionary.dicts.en).sort()
+if (zhKeys.join(',') !== enKeys.join(',')) throw new Error('zh and en dictionaries must share the same key set')
+const placeholders = (value) => [...value.matchAll(/\{(\w+)\}/g)].map((match) => match[1]).sort().join(',')
+for (const key of zhKeys) {
+  if (typeof dictionary.dicts.zh[key] !== 'string' || typeof dictionary.dicts.en[key] !== 'string') throw new Error(`dictionary value must be a string: ${key}`)
+  if (placeholders(dictionary.dicts.zh[key]) !== placeholders(dictionary.dicts.en[key])) throw new Error(`placeholder mismatch for ${key}`)
+}
 
-console.log('\nOK: panel icon and main page registered with matching ids')
+console.log('\nOK: panel icon and main page registered with matching ids, zh + en copy registered')
